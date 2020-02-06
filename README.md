@@ -1,1 +1,1 @@
-# analytics_exercise
+# analytics_example
