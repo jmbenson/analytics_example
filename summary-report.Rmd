@@ -1,0 +1,206 @@
+---
+title: "Data Exercise"
+author: "Jennifer Benson"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## 1. Data cleaning
+Before use in analysis, the data provided for the coding excerise had to be proccessed. Once the data was imported into R, the following files were merged: results-20171214-145849.csv and results-20171214-145922.csv. This was done by standardizing the datasets, which included creating a message type column denoting whether the message was a jsonPayload_event or jsonPayload_log to be able to differentiate between the data sets. Furthermore, the date column was converted to a date object to allow for data manipulation. There are no missing values in the data set and column types include string and dates; also, the data is representative of 12/12 through 12/14.  
+  
+```{r, include=FALSE}
+# load packages 
+library(data.table)
+library(ggplot2)
+
+# load in files now
+binarySensor <- fread("*/files/QJQ-823_121317.csv") # binary sensor data
+logServer <- fread("*/files/results-20171214-145849.csv") # log server data
+eventServer <- fread("*/files/results-20171214-145922.csv") # event server data
+
+# we need to clean the data now (convert time column to date object, check for NAs, etc.)
+eventServer <-  eventServer[, -c("V4", "V5", "V6")] # delete extra, empty columns loaded in
+eventServer[, messageType := "jsonPayload_event"] # create column so we can keep track of log/event 
+setnames(eventServer, "jsonPayload_event", "message") # rename column
+
+logServer[, messageType := "jsonPayload_log"] # create column so we can keep track of log/event
+setnames(logServer, "jsonPayload_log", "message") # rename column
+
+messageServer <- dplyr::bind_rows(eventServer, logServer) # consolidate event and log data
+messageServer[, time := substr(messageServer$time, 1, nchar(messageServer$time)-3)] # strip UTC from end of time
+options(digits.secs=6) # so we can get enough digits with milliseconds for our data
+messageServer[, time := strptime(time, "%Y-%m-%d %H:%M:%OS")] # converting to date object
+messageServer[, monthDay := format(time, "%m-%d")] # add month and day column so we can keep track of days
+messageServer <- messageServer[order(time),]  # now need to make reorder time column
+
+```
+## 2. Connections
+  
+### 2.1 How often does the printer connect and disconnect? 
+Figure 1 shows connections and disconnections of the printer per day. 
+```{r, echo = FALSE, fig.align = "center", fig.width=12, fig.height=8}
+# subset to connections and disconnections
+connection <- messageServer[message %like% "WebSocketClient" | message %in% "ws:close",] 
+connectFrequency <- connection[,.N, by=c("message", "monthDay")] # get frequency of connection/disconnect per day 
+setnames(connectFrequency, "message", "communication") # update column name
+setnames(connectFrequency, "monthDay", "date") # update column name
+setnames(connectFrequency, "N", "frequency") # update column name
+
+# rename messages for better presentation
+connectFrequency[communication == "ws:close", communication := "disconnection"]
+connectFrequency[communication %like% "WebSocketClient", communication := "connection"]
+
+# make bar chart
+ggplot(connectFrequency, aes(x = date, y = frequency, fill = communication)) + 
+    geom_bar(stat = "identity", position = "dodge") + labs(title = "Figure 1: frequency of printer connections and disconnections") + theme_light() +  
+  scale_fill_manual(values = c("cornflowerblue", "orange1"))
+
+```
+  
+Furthermore, the printer connects an average of every 152.881 seconds and disconnects an average of every 185.9528 seconds. 
+
+```{r, echo = FALSE}
+connection <- messageServer[message %like% "WebSocketClient",] # subset to established connections
+connectionTime <- connection[, lag_elapsed := c(NA,diff(time)), by = "monthDay"] # find time elapsed between connections by day
+connectionTime <- na.omit(connectionTime$lag_elapsed) # convert to vector and remove NAs
+disconnect <- messageServer[message %like% "ws:close",] # subset to closed connections
+closeTime <- disconnect[, lag_elapsed := c(NA,diff(time)), by = "monthDay"] # find time elapsed betwen disconnects by day
+closeTime <- na.omit(closeTime$lag_elapsed) # convert to vector and remove NAs
+
+# set-up table output
+connectDiscon <- data.table(communication = c("connection", "disconnection"),
+           mean = c(mean(connectionTime), mean(closeTime)),
+           median = c(median(connectionTime), median(closeTime)),
+           range = c(paste0(round(min(connectionTime), 6), " - ", round(max(connectionTime), 6)),
+                            paste0(round(min(closeTime), 6), " - ", round(max(closeTime), 6)))) 
+
+# output table
+knitr::kable(connectDiscon, caption = "time elapsed between printer connections and disconnections")
+```
+
+The time between connections was calculated using results-20171214-145849.csv, which contains logs; the message "WebSocketCleint: connection established" was used to determine how often the printer connects. How often the printer connects was calculated using two different metrics: by grouping the messages by day and calculating the time between connections as well as frequency counts of connections per day. The aformentioned methods were applied to results-20171214-145922.csv using the message "ws:close".  
+
+### 2.2 What is the average connection time?
+The average connection time is 11.3442 seconds. Average connection time was calculated by taking the average of the time elapsed between sequential connections and disconnections. Since the data is a snapshot of continuous data collection, there were some assumptions that had to be made with "extra" connections and closes that could not be matched. For example, a connection was intitiated on 2017-12-14 at 22:41:07.401000 with no associated closure in this snapshot of the data, which was subsequently removed. Furthermore, there was a disconnection that could not be matched with a connection; in this case, the first disconnection was removed from the data used for this calculation with the reasoning that the extra disconnection came from a connection implemented in a previous snapshot.
+
+
+```{r, echo = FALSE}
+connection <- messageServer[message %like% "WebSocketClient" | message == "ws:close",] # subset to established connections and disconnections
+connection <- connection[-24] # remove last connection with no associated disconnection
+connection <- connection[-3] # remove first disconnection as cannot be matched to connection
+# number sequential connections and siconnections to "match" them
+connection$pair <- c(1,2,1,2,3,3,4,5,6,4,5,7,6,8,7,8,9,9,10,10,11,11)
+connectionTime <- connection[, lag_elapsed := c(NA,diff(time)), by = "pair"] # find time elapsed between connections by day
+# mean of average connection times
+# mean(na.omit(connectionTime$lag_elapsed))
+```
+
+## 3. Head-hunts    
+
+### 3.1 How often (over what period) does the printer perform head-hunt?  
+The printer performs head-hunt an average of 8.4 times per request, which was calculated by dividing the frequency of head-hunt actions performed by the frequency of successful completions of head-hunts. Futhermore, Figure 2 shows the frequency of head-hunt requests and successful completions per day. As shown in the table, the head-hunts performed per request has a minimum of  1.5 on 12/13, which indicates more efficiency, to a maximum of 18 on 12/12.      
+  
+```{r, echo = FALSE, fig.width=12, fig.height=8}
+# subset data to received hunt requests and successful completions
+huntReceived <- messageServer[message %in% c("hunt:finished:succeeded", "hunt:received")]
+# get frequency of hunt requests and success per day
+huntFrequency <- huntReceived[,.N, by=c("message", "monthDay")]
+
+setnames(huntFrequency, "monthDay", "date") # update column name
+setnames(huntFrequency, "N", "frequency") # update column name
+
+# rename messages for better presentation
+huntFrequency[message == "hunt:finished:succeeded", message := "completion"]
+huntFrequency[message == "hunt:received", message := "attempt"]
+
+ggplot(huntFrequency, aes(x = date, y = frequency, fill = message)) + 
+    geom_bar(stat = "identity", position = "dodge") + labs(title = "Figure 2: frequency of head-hunt requests and completions") + theme_light() +  geom_text(aes(label=frequency), position=position_dodge(width=0.9), vjust=-0.25) +
+  scale_fill_manual(values = c("cornflowerblue", "orange1"))
+
+```
+  
+### 3.2 Is the head-hunt result always the same?  
+The head-hunt result is either a success or failure, but if it fails the head-hunt is repeated until success is achieved. Thus, in the end the same result, a successful head-hunt, is achieved. As shown in Table 2, the printer re-attempts to perform the head-hunt until a successful outcome occurs.    
+
+```{r, echo = FALSE}
+headHunts <- messageServer[message %in% c("hunt:failed", "hunt:received", "hunt:finished:succeeded"),]
+headHunts <- headHunts[, -c("labels_machine_serial", "monthDay")]
+knitr::kable(headHunts[84:89, ], caption = "Subset of sequential hunt failure and success calls")
+
+```
+
+  
+### 3.3 Does it always require the same amount of time to complete a hunt?  
+There are two parts to this question:  
+  * time elapsed between a successful pair of "hunt:received" and "hunt:finished:succeeded" calls  
+  * time elapsed between an initital, failed "hunt:received" call and "hunt:finished:succeeded"  
+     
+Both of these questions are relevant and inform different aspects of the head-hunt procces.
+      
+As seen in Table 3, it does not always require the same amount of time to complete a hunt; the mean time to complete a hunt is 15.00318 seconds, the median is 8.96598, and the range is 8.731 to 28.638. 
+
+```{r, echo = FALSE}
+headHunts <- messageServer[message %like% "hunt",] # subset to head-hunt data
+
+huntSuccess <- headHunts[message %in% c("hunt:finished:succeeded", 
+                                                  "hunt:received")] 
+
+# 
+rowsFinish <- huntSuccess[message == "hunt:finished:succeeded", which = TRUE]
+rows <- append(rowsFinish, rowsFinish[1:4]+1)
+rows <- append(rows, 1)
+huntSuccess <- huntSuccess[rows,] # subset to rows with only succesful head-hunts 
+huntSuccess <- huntSuccess[order(time),]  # now need to make reorder time column
+huntSuccess$pair <- c(1, 1, 2, 2, 3, 3, 4, 4, 5, 5)
+time <- as.numeric(na.omit(huntSuccess[, .(lag_elapsed = c(NA,diff(time))), by = "pair"]$lag_elapsed))
+knitr::kable(as.data.frame(time), caption = "time in seconds elapsed to complete a hunt")
+
+```
+  
+This variation in time to complete a hunt is driven by multiple failed attempts at performing the head-hunt action. This can be interpreted from Table 4, which shows that the average time between a successful "hunt:received"  to a "hunt:finished:succeeded" message is consistent with a range of 8.965998-9.449998, mean of 9.051799, and median of 9.036. 
+
+```{r, echo = FALSE}
+headHunts <- messageServer[message %like% "hunt",] # subset to head-hunt data
+
+# time elapsed between completed head-hunts
+huntSuccess <- headHunts[message %in% c("hunt:finished:succeeded", 
+                                                  "hunt:received", "hunt:reset")] 
+
+# want to keep only rows that state hunt:finished:succeeded and the row directly above!
+rowsFinish <- huntSuccess[message == "hunt:finished:succeeded", which = TRUE]
+rows <- append(rowsFinish, rowsFinish - 1)
+huntSuccess <- huntSuccess[rows,] # subset to rows with only succesful head-hunts 
+huntSuccess <- huntSuccess[order(time),]  # now need to make reorder time column
+huntSuccess$pair <- c(1, 1, 2, 2, 3, 3, 4, 4, 5, 5)
+time <- as.numeric(na.omit(huntSuccess[, .(lag_elapsed = c(NA,diff(time))), by = "pair"]$lag_elapsed))
+knitr::kable(as.data.frame(time), caption = "time in seconds elapsed to complete a successful hunt")
+
+```
+
+## 4. Change in machine settings
+### 4.1 What is the rate of change of the "machine settings" over time?   
+The average rate of change of the "machine settings" was determine by the average time between completions as defined by a "settings:completed" message, which resulted in an average rate of change of 145.24 seconds.
+```{r, echo = FALSE}
+# subset to settings completed, which indicates an update of "machine settings"
+settings <- messageServer[message == "settings:completed"] 
+# calculate time elapsed between  messages within each day
+settings[, lag_elapsed := c(NA,diff(time)), by = "monthDay"]
+# take the average now
+# mean(na.omit(settings$lag_elapsed))
+
+```
+
+### 4.2 How often does the server request "machine settings", and how does that compare with how often the printer updates them?
+The server requests "machine settings" with approximately the same rate of change that they get updated; both have an average rate of change of 145.24 seconds. 
+
+```{r, echo = FALSE}
+# subset to settings received, which indicates a request in update to "machine settings"
+settingsReceived <- messageServer[message == "settings:received"]
+# calculate time elapsed between  messages within each day
+settingsReceived[, lag_elapsed := c(NA,diff(time)), by = "monthDay"]
+# take the average now
+#mean(na.omit(settingsReceived$lag_elapsed))
+```
+
